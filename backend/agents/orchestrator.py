@@ -37,7 +37,7 @@ class DevOpsCrisisCommander:
         self.config =Config.from_default(
          llm_provider=LLMProvider.GOOGLE,
          default_model="google/gemini-1.5-pro-latest",
-        google_api_key="AIzaSyCQxQ0V6gz3OUIrisNxMYU_t6iOXqizTNs"
+        google_api_key=GOOGLE_API_KEY
         )
         
         # Create tool instances
