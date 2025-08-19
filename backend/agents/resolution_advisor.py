@@ -1,6 +1,7 @@
 """
 Resolution Advisor Agent using Portia AI SDK
 """
+import json
 import sys
 import os
 from datetime import datetime
@@ -63,14 +64,26 @@ class ResolutionAdvisorTool(Tool):
         # Initialize runbooks - storing as instance data
         self._runbooks = self._load_runbooks()
     
-    def run(self, classification: Dict[str, Any], incident_context: Dict[str, Any]) -> Dict[str, Any]:
+    def run(self, context: ToolRunContext, classification_data: str) -> Dict[str, Any]:
         """
         Generate resolution plan based on classification and context
         """
         try:
+            # Parse classification data
+            if isinstance(classification_data, str):
+                try:
+                    classification = json.loads(classification_data)
+                except json.JSONDecodeError:
+                    classification = {"category": "unknown", "severity": "medium"}
+            else:
+                classification = classification_data
+            
             category = classification.get("category", "unknown")
             severity = classification.get("severity", "medium")
             confidence = classification.get("confidence", 0.5)
+            
+            # Create empty incident context for now
+            incident_context = {}
             
             # Find matching runbooks
             matched_runbooks = self._find_matching_runbooks(category, severity)
