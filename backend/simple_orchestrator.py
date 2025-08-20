@@ -1,6 +1,7 @@
 """
 Simplified Crisis Commander for testing without complex Portia setup
 """
+import asyncio
 import json
 import uuid
 from datetime import datetime
@@ -162,6 +163,144 @@ class SimpleCrisisCommander:
             "total_incidents": len(self.active_incidents) + len(self.completed_incidents),
             "recent_incidents": list(self.active_incidents.values())[:10]
         }
+    
+    def get_available_scenarios(self) -> List[str]:
+        """Get available simulation scenarios"""
+        return MockDataGenerator.get_scenario_names()
+    
+    async def simulate_incident(self, scenario_name: str = None) -> Incident:
+        """Simulate an incident for demo purposes"""
+        alert = MockDataGenerator.generate_alert(scenario_name)
+        return await self.process_alert(alert)
+    
+    async def process_alert(self, alert: Alert) -> Incident:
+        """Process an alert and create an incident with full workflow"""
+        try:
+            # Create incident
+            incident = Incident(
+                incident_id=str(uuid.uuid4()),
+                alert_id=alert.alert_id,
+                status=IncidentStatus.DETECTED,
+                created_at=datetime.now(),
+                timeline=[]
+            )
+            
+            # Store in active incidents
+            self.active_incidents[incident.incident_id] = incident
+            
+            # Broadcast incident creation
+            await self.broadcast_update({
+                "type": "incident_created",
+                "data": {
+                    "incident_id": incident.incident_id,
+                    "alert": alert.model_dump() if hasattr(alert, 'model_dump') else alert.__dict__,
+                    "status": incident.status
+                },
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            # Step 1: Classify the incident
+            await self._update_incident_status(incident, IncidentStatus.ANALYZING)
+            classification_result = self.incident_classifier.run(alert.__dict__ if hasattr(alert, '__dict__') else alert)
+            
+            # Update incident with classification
+            incident.classification = Classification(**classification_result)
+            incident.timeline.append({
+                "timestamp": datetime.now(),
+                "agent": "IncidentClassifier",
+                "action": "classify_incident", 
+                "result": classification_result,
+                "duration_ms": 2000
+            })
+            
+            # Step 2: Get resolution advisory
+            await self._update_incident_status(incident, IncidentStatus.RESOLVING)
+            resolution_result = self.resolution_advisor.run(
+                classification=classification_result,
+                incident_context=alert.__dict__ if hasattr(alert, '__dict__') else alert
+            )
+            
+            # Add resolution to timeline
+            incident.timeline.append({
+                "timestamp": datetime.now(),
+                "agent": "ResolutionAdvisor",
+                "action": "suggest_resolution",
+                "result": resolution_result,
+                "duration_ms": 3500
+            })
+            
+            # Step 3: Auto-resolve for demo
+            await self._simulate_resolution(incident, resolution_result)
+            
+            return incident
+            
+        except Exception as e:
+            print(f"Error processing alert: {e}")
+            raise
+    
+    async def _update_incident_status(self, incident: Incident, status: IncidentStatus):
+        """Update incident status and broadcast"""
+        incident.status = status
+        
+        await self.broadcast_update({
+            "type": "incident_updated",
+            "data": {
+                "incident_id": incident.incident_id,
+                "status": status,
+                "timestamp": datetime.now().isoformat()
+            },
+            "timestamp": datetime.now().isoformat()
+        })
+    
+    async def _simulate_resolution(self, incident: Incident, resolution_result: Dict[str, Any]):
+        """Simulate incident resolution for demo"""
+        try:
+            # Simulate some resolution time
+            import asyncio
+            await asyncio.sleep(2)
+            
+            # Mark as resolved
+            await self._update_incident_status(incident, IncidentStatus.RESOLVED)
+            
+            # Generate postmortem
+            postmortem_result = self.postmortem_generator.run(
+                incident_data=incident.__dict__ if hasattr(incident, '__dict__') else incident,
+                resolution_data=resolution_result
+            )
+            
+            # Add postmortem to timeline
+            incident.timeline.append({
+                "timestamp": datetime.now(),
+                "agent": "PostMortemGenerator", 
+                "action": "generate_postmortem",
+                "result": postmortem_result,
+                "duration_ms": 1500
+            })
+            
+            # Move to completed
+            self.completed_incidents[incident.incident_id] = incident
+            del self.active_incidents[incident.incident_id]
+            
+            # Broadcast completion
+            await self.broadcast_update({
+                "type": "incident_resolved",
+                "data": {
+                    "incident_id": incident.incident_id,
+                    "postmortem": postmortem_result
+                },
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            print(f"✓ Incident {incident.incident_id} resolved with full workflow")
+            
+        except Exception as e:
+            print(f"Error resolving incident: {e}")
+            raise
+    
+    def get_incident_by_id(self, incident_id: str) -> Optional[Incident]:
+        """Get specific incident by ID"""
+        return (self.active_incidents.get(incident_id) or 
+                self.completed_incidents.get(incident_id))
 
 # Create global instance
 crisis_commander = SimpleCrisisCommander()
