@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from models.models import Alert, Incident, WebSocketMessage
-from simple_orchestrator import crisis_commander
+from agents.orchestrator import crisis_commander
 from data.mock_generator import MockDataGenerator
 
 
@@ -23,7 +23,13 @@ app = FastAPI(
 # CORS middleware for frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173"],  # Vue.js dev servers
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+    ],  # Vue.js dev servers (localhost and 127.0.0.1)
+    allow_origin_regex=r"https?://.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -98,6 +104,34 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 # API Routes
+def _to_dict(obj: Any) -> Dict[str, Any]:
+    if hasattr(obj, 'dict'):
+        return obj.dict()
+    return obj
+
+def _extract_resolution_from_timeline(incident: Dict[str, Any]) -> Dict[str, Any] | None:
+    timeline = incident.get("timeline", []) or []
+    # Portia orchestrator stores step with action 'suggest_resolution'
+    for entry in timeline:
+        action = entry.get("action") or entry.get("event")
+        if action in ("suggest_resolution", "Resolution plan generated"):
+            result = entry.get("result") or entry.get("details")
+            if isinstance(result, dict) and result.get("recommended_steps"):
+                return result
+            # Simple orchestrator stores details as string like 'X steps identified'
+    return None
+
+def normalize_incident(incident_obj: Any) -> Dict[str, Any]:
+    inc = _to_dict(incident_obj)
+    # Ensure classification is plain dict if it's a Pydantic model
+    if hasattr(inc.get("classification", {}), 'dict'):
+        inc["classification"] = inc["classification"].dict()
+    # Attach resolution if missing and can be extracted from timeline
+    if not inc.get("resolution"):
+        res = _extract_resolution_from_timeline(inc)
+        if res:
+            inc["resolution"] = res
+    return inc
 @app.get("/")
 async def root():
     return {
@@ -123,12 +157,7 @@ async def simulate_incident(request: SimulationRequest):
     """Simulate an incident for demo purposes"""
     try:
         incident = await crisis_commander.simulate_incident(request.scenario_name)
-        return {
-            "success": True,
-            "incident_id": incident.incident_id,
-            "status": incident.status,
-            "message": f"Incident simulation started: {incident.incident_id}"
-        }
+        return normalize_incident(incident)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -138,12 +167,7 @@ async def process_alert(request: AlertRequest):
     """Process a real alert through the incident response workflow"""
     try:
         incident = await crisis_commander.process_alert(request.alert)
-        return {
-            "success": True,
-            "incident_id": incident.incident_id,
-            "status": incident.status,
-            "classification": incident.classification.dict() if incident.classification else None
-        }
+        return normalize_incident(incident)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -152,14 +176,14 @@ async def process_alert(request: AlertRequest):
 async def get_active_incidents():
     """Get all active incidents"""
     incidents = crisis_commander.get_active_incidents()
-    return [incident.dict() for incident in incidents]
+    return [normalize_incident(i) for i in incidents]
 
 
 @app.get("/incidents/completed")
 async def get_completed_incidents():
     """Get all completed incidents"""
     incidents = crisis_commander.get_completed_incidents()
-    return [incident.dict() for incident in incidents]
+    return [normalize_incident(i) for i in incidents]
 
 
 @app.get("/incidents/{incident_id}")
@@ -168,8 +192,7 @@ async def get_incident(incident_id: str):
     incident = crisis_commander.get_incident_by_id(incident_id)
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
-    
-    return incident.dict()
+    return normalize_incident(incident)
 
 
 @app.get("/incidents/{incident_id}/timeline")
@@ -178,12 +201,26 @@ async def get_incident_timeline(incident_id: str):
     incident = crisis_commander.get_incident_by_id(incident_id)
     if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
-    
+    incident = normalize_incident(incident)
     return {
         "incident_id": incident_id,
-        "timeline": incident.timeline,
-        "status": incident.status
+        "timeline": incident.get("timeline", []),
+        "status": incident.get("status", "unknown")
     }
+
+
+@app.post("/incidents/{incident_id}/resolve")
+async def resolve_incident(incident_id: str):
+    """Resolve an incident and return updated record (with postmortem if available)."""
+    try:
+        if hasattr(crisis_commander, 'resolve_incident'):
+            incident = await crisis_commander.resolve_incident(incident_id)
+        else:
+            # Fallback to simple orchestrator resolve if present
+            incident = await crisis_commander.resolve_incident(incident_id)  # type: ignore
+        return normalize_incident(incident)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/scenarios")
@@ -239,8 +276,9 @@ async def get_dashboard_metrics():
     severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
     
     for incident in active_incidents + completed_incidents:
-        if incident.classification:
-            severity = incident.classification.severity
+        classification = incident.get("classification", {})
+        if classification:
+            severity = classification.get("severity", "medium")
             if severity in severity_counts:
                 severity_counts[severity] += 1
     
@@ -294,11 +332,12 @@ async def demo_status():
 # Startup event
 @app.on_event("startup")
 async def startup_event():
-    print("🚀 DevOps Crisis Commander API starting up...")
-    print("📡 WebSocket endpoint available at: /ws")
-    print("📊 Dashboard metrics available at: /metrics/dashboard")
-    print("🎭 Demo scenarios available at: /scenarios")
-    print("✅ System ready for incident simulation!")
+    # Use ASCII-only messages to avoid Windows console encoding issues
+    print("DevOps Crisis Commander API starting up...")
+    print("WebSocket endpoint available at: /ws")
+    print("Dashboard metrics available at: /metrics/dashboard")
+    print("Demo scenarios available at: /scenarios")
+    print("System ready for incident simulation!")
 
 
 if __name__ == "__main__":

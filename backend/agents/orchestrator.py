@@ -18,12 +18,12 @@ from portia import Portia, Config, LLMProvider, Tool, ToolRunContext
 from models.models import Incident, Alert, Classification, IncidentStatus, WebSocketMessage
 from data.mock_generator import MockDataGenerator
 # Import the agent tools
-from incident_classifier import IncidentClassifierTool
-from resolution_advisor import ResolutionAdvisorTool
-from postmortem_generator import PostMortemGeneratorTool
+from .incident_classifier import IncidentClassifierTool
+from .resolution_advisor import ResolutionAdvisorTool
+from .postmortem_generator import PostMortemGeneratorTool
 
 load_dotenv()
-GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
+MISTRAL_API_KEY = os.getenv('MISTRAL_API_KEY')
 
 
 class DevOpsCrisisCommander:
@@ -35,9 +35,9 @@ class DevOpsCrisisCommander:
     def __init__(self):
         # Initialize Portia with custom configuration
         self.config = Config.from_default(
-            llm_provider=LLMProvider.GOOGLE,
-            default_model="google/gemini-1.5-pro-latest",
-            google_api_key=GOOGLE_API_KEY,
+            llm_provider=LLMProvider.MISTRALAI,
+            default_model="mistralai/mistral-large-latest",
+            mistralai_api_key=MISTRAL_API_KEY,
             portia_api_key=os.getenv("PORTIA_API_KEY")
         )
         
@@ -59,7 +59,6 @@ class DevOpsCrisisCommander:
             tools=tools
         )
         
-        # In-memory storage for demo (in production would use proper database)
         self.active_incidents: Dict[str, Incident] = {}
         self.completed_incidents: Dict[str, Incident] = {}
         self.websocket_callbacks: List[callable] = []
@@ -89,7 +88,15 @@ class DevOpsCrisisCommander:
             
             # Step 1: Classify the incident
             await self._update_incident_status(incident, IncidentStatus.ANALYZING)
+            await self._broadcast_update({
+                "type": "agent_progress",
+                "data": {"agent_name": "Incident Classifier", "task": "Classifying incident", "progress": 10},
+            })
             classification_result = await self._classify_incident(alert)
+            await self._broadcast_update({
+                "type": "agent_completed",
+                "data": {"agent_name": "Incident Classifier", "duration": 2.0},
+            })
             
             # Update incident with classification
             incident.classification = Classification(**classification_result)
@@ -103,7 +110,15 @@ class DevOpsCrisisCommander:
             
             # Step 2: Get resolution advisory  
             await self._update_incident_status(incident, IncidentStatus.RESOLVING)
+            await self._broadcast_update({
+                "type": "agent_progress",
+                "data": {"agent_name": "Resolution Advisor", "task": "Generating resolution plan", "progress": 40},
+            })
             resolution_result = await self._get_resolution_advisory(classification_result, alert)
+            await self._broadcast_update({
+                "type": "agent_completed",
+                "data": {"agent_name": "Resolution Advisor", "duration": 3.5},
+            })
             
             # Add resolution to timeline
             incident.timeline.append({
@@ -115,7 +130,15 @@ class DevOpsCrisisCommander:
             })
             
             # Step 3: Simulate resolution execution
+            await self._broadcast_update({
+                "type": "agent_progress",
+                "data": {"agent_name": "Resolution Executor", "task": "Executing resolution steps", "progress": 70},
+            })
             execution_result = await self._simulate_resolution_execution(resolution_result)
+            await self._broadcast_update({
+                "type": "agent_completed",
+                "data": {"agent_name": "Resolution Executor", "duration": 5.0},
+            })
             
             # Add execution to timeline
             incident.timeline.append({
@@ -134,7 +157,15 @@ class DevOpsCrisisCommander:
                 await self._update_incident_status(incident, IncidentStatus.RESOLVING)
             
             # Step 5: Generate post-mortem
+            await self._broadcast_update({
+                "type": "agent_progress",
+                "data": {"agent_name": "PostMortem Generator", "task": "Generating postmortem report", "progress": 90},
+            })
             postmortem_result = await self._generate_postmortem(incident, resolution_result)
+            await self._broadcast_update({
+                "type": "agent_completed",
+                "data": {"agent_name": "PostMortem Generator", "duration": 2.5},
+            })
             
             # Add post-mortem to timeline
             incident.timeline.append({
@@ -187,6 +218,10 @@ class DevOpsCrisisCommander:
     
     async def _classify_incident(self, alert: Alert) -> Dict[str, Any]:
         """Use Portia to classify the incident"""
+        # Clean metrics for safe string formatting
+        metrics_dict = alert.metrics.dict() if hasattr(alert.metrics, 'dict') else dict(alert.metrics or {})
+        clean_metrics = {k: v for k, v in metrics_dict.items() if v is not None}
+        
         query = f"""
         Classify this DevOps incident based on the alert data:
         
@@ -194,7 +229,7 @@ class DevOpsCrisisCommander:
         Severity: {alert.severity}
         Message: {alert.message}
         Affected Services: {', '.join(alert.affected_services)}
-        Metrics: {alert.metrics.dict()}
+        Metrics: {clean_metrics}
         Source: {alert.source_system}
         
         Provide detailed classification including category, severity assessment, 
@@ -202,17 +237,46 @@ class DevOpsCrisisCommander:
         """
         
         # Use Portia to run the classification
-        plan_run = await self.portia.arun(
-            query=query,
-            tools=["incident_classifier"]
-        )
-        
-        # Extract result from plan run
-        result = self._extract_plan_result(plan_run)
-        return result if result else self._fallback_classification(alert)
+        try:
+            plan_run = await self.portia.arun(
+                query=query,
+                tools=["incident_classifier"]
+            )
+            # Extract result from plan run
+            result = self._extract_plan_result(plan_run)
+            if result:
+                return result
+            # Fall through to direct tool if plan output missing
+            raise RuntimeError("Empty plan output for incident_classifier")
+        except Exception as e:
+            # Broadcast agent error and use direct tool as fallback path
+            await self._broadcast_update({
+                "type": "agent_error",
+                "data": {"agent_name": "Incident Classifier", "error": str(e)}
+            })
+            alert_dict = {
+                "alert_type": str(alert.alert_type).lower(),
+                "severity": str(alert.severity).lower(),
+                "message": alert.message,
+                "metrics": alert.metrics.dict() if hasattr(alert.metrics, 'dict') else dict(alert.metrics or {}),
+                "affected_services": list(alert.affected_services or []),
+                "source_system": alert.source_system,
+                "timestamp": str(alert.timestamp),
+            }
+            # Create a mock context with the alert data
+            from types import SimpleNamespace
+            mock_context = SimpleNamespace()
+            mock_context.alert_data = alert_dict
+            mock_context.kwargs = {"alert_data": alert_dict}
+            
+            return self.incident_classifier.run(mock_context)
     
     async def _get_resolution_advisory(self, classification: Dict[str, Any], alert: Alert) -> Dict[str, Any]:
         """Use Portia to get resolution advisory"""
+        # Clean metrics for safe string formatting
+        metrics_dict = alert.metrics.dict() if hasattr(alert.metrics, 'dict') else dict(alert.metrics or {})
+        clean_metrics = {k: v for k, v in metrics_dict.items() if v is not None}
+        
         query = f"""
         Provide resolution guidance for this classified incident:
         
@@ -222,21 +286,35 @@ class DevOpsCrisisCommander:
         - Type: {alert.alert_type}
         - Message: {alert.message}
         - Affected Services: {', '.join(alert.affected_services)}
-        - Metrics: {alert.metrics.dict()}
+        - Metrics: {clean_metrics}
         
         Generate a detailed resolution plan with step-by-step instructions,
         time estimates, success probability, and rollback procedures.
         """
         
         # Use Portia to run the resolution advisory
-        plan_run = await self.portia.arun(
-            query=query,
-            tools=["resolution_advisor"]
-        )
-        
-        # Extract result from plan run
-        result = self._extract_plan_result(plan_run)
-        return result if result else self._fallback_resolution()
+        try:
+            plan_run = await self.portia.arun(
+                query=query,
+                tools=["resolution_advisor"]
+            )
+            # Extract result from plan run
+            result = self._extract_plan_result(plan_run)
+            if result:
+                return result
+            raise RuntimeError("Empty plan output for resolution_advisor")
+        except Exception as e:
+            await self._broadcast_update({
+                "type": "agent_error",
+                "data": {"agent_name": "Resolution Advisor", "error": str(e)}
+            })
+            # Create a mock context with the classification data
+            from types import SimpleNamespace
+            mock_context = SimpleNamespace()
+            mock_context.classification_data = classification
+            mock_context.kwargs = {"classification_data": classification}
+            
+            return self.resolution_advisor.run(mock_context)
     
     async def _simulate_resolution_execution(self, resolution_plan: Dict[str, Any]) -> Dict[str, Any]:
         """Simulate execution of resolution steps"""
@@ -293,14 +371,34 @@ class DevOpsCrisisCommander:
         """
         
         # Use Portia to run the post-mortem generation
-        plan_run = await self.portia.arun(
-            query=query,
-            tools=["postmortem_generator"]
-        )
-        
-        # Extract result from plan run
-        result = self._extract_plan_result(plan_run)
-        return result if result else self._fallback_postmortem(incident)
+        try:
+            plan_run = await self.portia.arun(
+                query=query,
+                tools=["postmortem_generator"]
+            )
+            # Extract result from plan run
+            result = self._extract_plan_result(plan_run)
+            if result:
+                return result
+            raise RuntimeError("Empty plan output for postmortem_generator")
+        except Exception as e:
+            await self._broadcast_update({
+                "type": "agent_error",
+                "data": {"agent_name": "PostMortem Generator", "error": str(e)}
+            })
+            incident_data = {
+                "incident_id": incident.incident_id,
+                "alert": self._get_alert_for_incident(incident),
+                "classification": incident.classification.dict() if incident.classification else {},
+                "timeline": [entry.dict() if hasattr(entry, 'dict') else entry for entry in incident.timeline],
+            }
+            # Create a mock context with the incident data
+            from types import SimpleNamespace
+            mock_context = SimpleNamespace()
+            mock_context.incident_data = incident_data
+            mock_context.kwargs = {"incident_data": incident_data}
+            
+            return self.postmortem_generator.run(mock_context)
     
     def _extract_plan_result(self, plan_run) -> Optional[Dict[str, Any]]:
         """Extract the result from a Portia plan run"""
@@ -415,6 +513,61 @@ class DevOpsCrisisCommander:
         """Simulate an incident for demo purposes"""
         alert = MockDataGenerator.generate_alert(scenario_name)
         return await self.process_alert(alert)
+
+    async def resolve_incident(self, incident_id: str) -> Incident:
+        """Mark incident as resolved and generate post-mortem."""
+        if incident_id not in self.active_incidents:
+            # If already completed, return as-is
+            incident = self.completed_incidents.get(incident_id)
+            if not incident:
+                raise ValueError(f"Incident {incident_id} not found")
+            return incident
+        incident = self.active_incidents[incident_id]
+        await self._broadcast_update({
+            "type": "agent_progress",
+            "data": {"agent_name": "Resolution Executor", "task": "Manual resolve requested", "progress": 50},
+        })
+        # Simulate successful execution result
+        execution_result = {
+            "success": True,
+            "executed_steps": [],
+            "total_steps": 0,
+            "duration_ms": 0,
+        }
+        incident.timeline.append({
+            "timestamp": datetime.now(),
+            "agent": "ResolutionExecutor",
+            "action": "execute_resolution",
+            "result": execution_result,
+            "duration_ms": 1000,
+        })
+        # Update status
+        await self._update_incident_status(incident, IncidentStatus.RESOLVED)
+        incident.resolved_at = datetime.now()
+        # Generate postmortem
+        resolution_data = incident.timeline[-1]["result"] if incident.timeline else {}
+        await self._broadcast_update({
+            "type": "agent_progress",
+            "data": {"agent_name": "PostMortem Generator", "task": "Generating postmortem report", "progress": 90},
+        })
+        postmortem_result = await self._generate_postmortem(incident, resolution_data)
+        await self._broadcast_update({
+            "type": "agent_completed",
+            "data": {"agent_name": "PostMortem Generator", "duration": 2.0},
+        })
+        # Broadcast completion
+        await self._broadcast_update({
+            "type": "incident_completed",
+            "data": {
+                "incident_id": incident.incident_id,
+                "status": incident.status,
+                "postmortem": postmortem_result,
+            },
+        })
+        # Move to completed
+        self.completed_incidents[incident_id] = incident
+        del self.active_incidents[incident_id]
+        return incident
     
     def get_active_incidents(self) -> List[Incident]:
         """Get all active incidents"""
@@ -448,16 +601,26 @@ async def test_workflow():
         
         # Test incident classifier directly
         alert_data = '{"alert_type": "cpu", "severity": "high", "message": "High CPU usage detected", "affected_services": ["web-server"], "metrics": {"cpu_usage": 95}}'
-        classifier_result = crisis_commander.incident_classifier.run(None, alert_data)
+        from types import SimpleNamespace
+        mock_context = SimpleNamespace()
+        mock_context.alert_data = alert_data
+        mock_context.kwargs = {"alert_data": alert_data}
+        classifier_result = crisis_commander.incident_classifier.run(mock_context)
         print(f"✅ Incident Classifier: {classifier_result.get('category', 'Unknown')} - {classifier_result.get('severity', 'Unknown')}")
         
         # Test resolution advisor directly  
-        resolution_result = crisis_commander.resolution_advisor.run(None, alert_data)
+        mock_context2 = SimpleNamespace()
+        mock_context2.classification_data = classifier_result
+        mock_context2.kwargs = {"classification_data": classifier_result}
+        resolution_result = crisis_commander.resolution_advisor.run(mock_context2)
         print(f"✅ Resolution Advisor: {len(resolution_result.get('recommended_steps', []))} steps recommended")
         
         # Test postmortem generator directly
         incident_data = '{"incident_id": "test-123", "timeline": [], "classification": {"category": "infrastructure", "severity": "high"}}'
-        postmortem_result = crisis_commander.postmortem_generator.run(None, incident_data)
+        mock_context3 = SimpleNamespace()
+        mock_context3.incident_data = incident_data
+        mock_context3.kwargs = {"incident_data": incident_data}
+        postmortem_result = crisis_commander.postmortem_generator.run(mock_context3)
         print(f"✅ PostMortem Generator: Report generated with {len(postmortem_result.get('lessons_learned', []))} lessons")
         
         print("\n1️⃣ Testing full workflow simulation...")

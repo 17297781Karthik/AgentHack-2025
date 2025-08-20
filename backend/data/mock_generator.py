@@ -297,3 +297,30 @@ class MockDataGenerator:
         ]
         
         return runbooks
+    
+    @classmethod
+    def generate_scenario_alert(cls, scenario_name: str) -> dict:
+        """Generate alert data for a specific scenario"""
+        if scenario_name not in cls.MOCK_SCENARIOS:
+            # Return random alert if scenario not found
+            return cls.generate_random_alert()
+        
+        scenario = cls.MOCK_SCENARIOS[scenario_name]
+        
+        return {
+            "id": f"alert-{random.randint(1000, 9999)}",
+            "alert_type": scenario["alert_type"],
+            "severity": scenario["severity"],
+            "message": scenario["message"],
+            "metrics": scenario["metrics"],
+            "affected_services": scenario["affected_services"],
+            "source_system": scenario["source_system"],
+            "timestamp": datetime.now().isoformat(),
+            "scenario_name": scenario_name
+        }
+    
+    @classmethod
+    def generate_random_alert(cls) -> dict:
+        """Generate a random alert from available scenarios"""
+        scenario_name = random.choice(list(cls.MOCK_SCENARIOS.keys()))
+        return cls.generate_scenario_alert(scenario_name)

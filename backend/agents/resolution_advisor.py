@@ -63,20 +63,45 @@ class ResolutionAdvisorTool(Tool):
         super().__init__()
         # Initialize runbooks - storing as instance data
         self._runbooks = self._load_runbooks()
+        # Use object.__setattr__ to bypass Pydantic validation
+        object.__setattr__(self, 'runbook_db', self._runbooks)
     
-    def run(self, context: ToolRunContext, classification_data: str) -> Dict[str, Any]:
+    def run(self, context: ToolRunContext = None) -> Dict[str, Any]:
         """
         Generate resolution plan based on classification and context
         """
         try:
+            # Extract inputs from context
+            classification_data = None
+            incident_context = {}
+            
+            if context is not None:
+                # Try various ways to extract classification data
+                for key in ('classification_data', 'classification', 'input', 'inputs'):
+                    value = getattr(context, key, None)
+                    if value is None and hasattr(context, 'kwargs') and isinstance(context.kwargs, dict):
+                        value = context.kwargs.get(key)
+                    if value is not None:
+                        classification_data = value
+                        break
+                
+                # Try to get incident context
+                incident_context = getattr(context, 'incident_context', {})
+                if not incident_context and hasattr(context, 'kwargs') and isinstance(context.kwargs, dict):
+                    incident_context = context.kwargs.get('incident_context', {})
+            
             # Parse classification data
             if isinstance(classification_data, str):
                 try:
                     classification = json.loads(classification_data)
                 except json.JSONDecodeError:
                     classification = {"category": "unknown", "severity": "medium"}
-            else:
+            elif isinstance(classification_data, dict):
                 classification = classification_data
+            elif hasattr(classification_data, 'dict'):
+                classification = classification_data.dict()
+            else:
+                classification = {"category": "unknown", "severity": "medium"}
             
             category = classification.get("category", "unknown")
             severity = classification.get("severity", "medium")
@@ -92,6 +117,9 @@ class ResolutionAdvisorTool(Tool):
             resolution_steps = self._generate_resolution_steps(
                 matched_runbooks, classification, incident_context
             )
+            
+            # Convert ResolutionStep objects to dictionaries
+            resolution_steps_dict = [step.dict() for step in resolution_steps]
             
             # Calculate estimates
             estimated_time = self._estimate_resolution_time(resolution_steps, severity)
@@ -118,7 +146,7 @@ class ResolutionAdvisorTool(Tool):
             
             return {
                 "incident_id": classification.get("incident_id", "unknown"),
-                "recommended_steps": resolution_steps,
+                "recommended_steps": resolution_steps_dict,
                 "estimated_time_minutes": estimated_time,
                 "success_probability": success_probability,
                 "human_approval_required": human_approval,

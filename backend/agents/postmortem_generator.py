@@ -64,11 +64,24 @@ class PostMortemGeneratorTool(Tool):
     
     output_schema: tuple = ("dict", "dict: postmortem report with timeline, root cause, lessons learned, and action items")
     
-    def run(self, context: ToolRunContext, incident_data: str) -> Dict[str, Any]:
+    def run(self, context: ToolRunContext = None) -> Dict[str, Any]:
         """
         Generate comprehensive post-mortem report
         """
         try:
+            # Get data from context parameters
+            incident_data = {}
+            resolution_data = {}
+            
+            if context is not None:
+                incident_data = getattr(context, 'incident_data', {})
+                if not incident_data and hasattr(context, 'kwargs') and isinstance(context.kwargs, dict):
+                    incident_data = context.kwargs.get('incident_data', {})
+                
+                resolution_data = getattr(context, 'resolution_data', {})
+                if not resolution_data and hasattr(context, 'kwargs') and isinstance(context.kwargs, dict):
+                    resolution_data = context.kwargs.get('resolution_data', {})
+            
             # Parse incident data
             if isinstance(incident_data, str):
                 try:
@@ -89,6 +102,9 @@ class PostMortemGeneratorTool(Tool):
             
             # Generate timeline
             timeline = self._reconstruct_timeline(timeline_data, alert_data)
+            
+            # Convert timeline objects to dictionaries
+            timeline_dict = [entry.dict() for entry in timeline]
             
             # Create summary
             summary = self._generate_summary(incident, resolution_data, timeline)
@@ -111,6 +127,9 @@ class PostMortemGeneratorTool(Tool):
                 lessons_learned, resolution_effectiveness, classification
             )
             
+            # Convert action items to dictionaries
+            action_items_dict = [item.dict() for item in action_items]
+            
             # Calculate metrics
             metrics = self._calculate_incident_metrics(timeline, resolution_data)
             
@@ -128,11 +147,11 @@ class PostMortemGeneratorTool(Tool):
             return {
                 "incident_id": incident_id,
                 "summary": summary,
-                "timeline": timeline,
+                "timeline": timeline_dict,
                 "root_cause_analysis": root_cause,
                 "resolution_effectiveness": resolution_effectiveness,
                 "lessons_learned": lessons_learned,
-                "action_items": action_items,
+                "action_items": action_items_dict,
                 "metrics": metrics,
                 "recommendations": recommendations,
                 "markdown_report": markdown_report,

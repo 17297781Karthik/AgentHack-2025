@@ -47,10 +47,26 @@ class IncidentClassifierTool(Tool):
     
     output_schema: tuple = ("dict", "dict: classification results with category, severity, confidence, and reasoning")
     
-    def run(self, context: ToolRunContext, alert_data: str) -> Dict[str, Any]:
+    def run(self, context: ToolRunContext = None) -> Dict[str, Any]:
+        """Classify an alert using rule-based logic.
+        Supports invocation with Portia context.
         """
-        Classify an alert using rule-based logic
-        """
+        # Extract alert_data from context
+        alert_data = {}
+        if context is not None:
+            # Try a few common ways Portia might carry inputs
+            for key in ("alert_data", "input", "inputs"):
+                try:
+                    value = getattr(context, 'get', lambda k, d=None: None)(key, None)  # if context is dict-like
+                except Exception:
+                    value = None
+                if not value:
+                    value = getattr(context, key, None)
+                if value is None and hasattr(context, 'kwargs') and isinstance(context.kwargs, dict):
+                    value = context.kwargs.get(key)
+                if value is not None:
+                    alert_data = value
+                    break
         try:
             # Parse alert data if it's a JSON string
             if isinstance(alert_data, str):
@@ -58,12 +74,16 @@ class IncidentClassifierTool(Tool):
                     alert_info = json.loads(alert_data)
                 except json.JSONDecodeError:
                     alert_info = {"raw_data": alert_data}
-            else:
+            elif isinstance(alert_data, dict):
                 alert_info = alert_data
+            elif hasattr(alert_data, 'dict'):
+                alert_info = alert_data.dict()
+            else:
+                alert_info = {}
             
             # Parse alert data
-            alert_type = alert_info.get("alert_type", "").lower()
-            severity = alert_info.get("severity", "").lower()
+            alert_type = str(alert_info.get("alert_type", "")).lower()
+            severity = str(alert_info.get("severity", "")).lower()
             metrics = alert_info.get("metrics", {})
             message = alert_info.get("message", "").lower()
             affected_services = alert_info.get("affected_services", [])
