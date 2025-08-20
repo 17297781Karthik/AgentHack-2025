@@ -47,17 +47,46 @@ class IncidentClassifierTool(Tool):
     
     output_schema: tuple = ("dict", "dict: classification results with category, severity, confidence, and reasoning")
     
-    def run(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
+    def run(self, context: ToolRunContext = None) -> Dict[str, Any]:
+        """Classify an alert using rule-based logic.
+        Supports invocation with Portia context.
         """
-        Classify an alert using rule-based logic
-        """
+        # Extract alert_data from context
+        alert_data = {}
+        if context is not None:
+            # Try a few common ways Portia might carry inputs
+            for key in ("alert_data", "input", "inputs"):
+                try:
+                    value = getattr(context, 'get', lambda k, d=None: None)(key, None)  # if context is dict-like
+                except Exception:
+                    value = None
+                if not value:
+                    value = getattr(context, key, None)
+                if value is None and hasattr(context, 'kwargs') and isinstance(context.kwargs, dict):
+                    value = context.kwargs.get(key)
+                if value is not None:
+                    alert_data = value
+                    break
         try:
+            # Parse alert data if it's a JSON string
+            if isinstance(alert_data, str):
+                try:
+                    alert_info = json.loads(alert_data)
+                except json.JSONDecodeError:
+                    alert_info = {"raw_data": alert_data}
+            elif isinstance(alert_data, dict):
+                alert_info = alert_data
+            elif hasattr(alert_data, 'dict'):
+                alert_info = alert_data.dict()
+            else:
+                alert_info = {}
+            
             # Parse alert data
-            alert_type = alert_data.get("alert_type", "").lower()
-            severity = alert_data.get("severity", "").lower()
-            metrics = alert_data.get("metrics", {})
-            message = alert_data.get("message", "").lower()
-            affected_services = alert_data.get("affected_services", [])
+            alert_type = str(alert_info.get("alert_type", "")).lower()
+            severity = str(alert_info.get("severity", "")).lower()
+            metrics = alert_info.get("metrics", {})
+            message = alert_info.get("message", "").lower()
+            affected_services = alert_info.get("affected_services", [])
             
             # Determine category
             category = self._determine_category(alert_type, message, affected_services)
@@ -66,7 +95,7 @@ class IncidentClassifierTool(Tool):
             assessed_severity = self._assess_severity(severity, metrics, message, category)
             
             # Calculate confidence
-            confidence = self._calculate_confidence(alert_data, category, assessed_severity)
+            confidence = self._calculate_confidence(alert_info, category, assessed_severity)
             
             # Generate tags
             tags = self._generate_tags(alert_type, message, affected_services, metrics)
@@ -78,7 +107,7 @@ class IncidentClassifierTool(Tool):
             reasoning = self._generate_reasoning(category, assessed_severity, confidence, metrics)
             
             return {
-                "incident_id": alert_data.get("id", "unknown"),
+                "incident_id": alert_info.get("id", "unknown"),
                 "category": category,
                 "severity": assessed_severity,
                 "confidence": confidence,
@@ -91,7 +120,7 @@ class IncidentClassifierTool(Tool):
         except Exception as e:
             # Fallback classification
             return {
-                "incident_id": alert_data.get("id", "unknown"),
+                "incident_id": "unknown",
                 "category": "unknown",
                 "severity": "medium",
                 "confidence": 0.3,
